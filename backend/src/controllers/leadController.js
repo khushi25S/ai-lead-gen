@@ -1,90 +1,122 @@
-// src/controllers/leadController.js
-const Lead = require('../models/Lead');
-const { scoreLead } = require('../services/aiService');
-const { sendEmail } = require('../services/emailService');
+const axios = require("axios");
+const Lead = require("../models/Lead");
+const { scoreLead } = require("../services/aiService");
+const { sendEmail } = require("../services/emailService");
 
+
+/* ----------------------------------------------------
+   CREATE or UPDATE LEAD
+------------------------------------------------------*/
 async function upsertLead(req, res) {
   try {
     const data = req.body;
-    if (!data.email) return res.status(400).json({ ok: false, error: 'email is required' });
+
+    if (!data.email) {
+      return res.status(400).json({ ok: false, error: "Email is required" });
+    }
 
     let lead = await Lead.findOne({ email: data.email });
+
     if (!lead) {
+      // Create new lead
       lead = new Lead({
-        name: data.name || '',
+        name: data.name || "",
         email: data.email,
-        phone: data.phone || '',
-        source: data.source || '',
+        phone: data.phone || "",
+        source: data.source || "",
+        role: data.role || "",
         metadata: data.metadata || {}
       });
     } else {
-      // update fields (simple merge)
+      // Update existing lead
       lead.name = data.name || lead.name;
       lead.phone = data.phone || lead.phone;
       lead.source = data.source || lead.source;
+      lead.role = data.role || lead.role;
       lead.metadata = { ...(lead.metadata || {}), ...(data.metadata || {}) };
     }
 
-    // Call AI scoring (async) — here we await so client gets scored lead immediately
+    // AI SCORING
     const scored = await scoreLead(lead);
     lead.score = scored.score;
     lead.classification = scored.classification;
-    lead.interactions = lead.interactions || [];
 
     await lead.save();
 
+    // 🔔 Auto-trigger webhook to n8n
+    try {
+      await axios.post("http://localhost:5678/webhook/lead-added", {
+        name: lead.name,
+        email: lead.email,
+        score: lead.score
+      });
+    } catch (webhookErr) {
+      console.error("Webhook Error:", webhookErr.message);
+    }
+
     return res.json({ ok: true, lead });
+
   } catch (err) {
-    console.error(err);
+    console.error("Upsert Lead Error:", err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
 
+
+/* ----------------------------------------------------
+   LIST ALL LEADS
+------------------------------------------------------*/
 async function listLeads(req, res) {
   try {
-    const q = req.query.q || '';
-    const filter = {};
-    if (q) {
-      const rex = new RegExp(q, 'i');
-      filter.$or = [{ name: rex }, { email: rex }, { 'metadata.company': rex }];
-    }
-    const leads = await Lead.find(filter).sort({ createdAt: -1 }).limit(500);
+    const leads = await Lead.find().sort({ createdAt: -1 });
     return res.json({ ok: true, leads });
   } catch (err) {
-    console.error(err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
 
+
+/* ----------------------------------------------------
+   GET SINGLE LEAD BY ID
+------------------------------------------------------*/
 async function getLead(req, res) {
   try {
     const lead = await Lead.findById(req.params.id);
-    if (!lead) return res.status(404).json({ ok: false, error: 'not_found' });
+    if (!lead) {
+      return res.status(404).json({ ok: false, error: "Lead not found" });
+    }
     return res.json({ ok: true, lead });
   } catch (err) {
-    console.error(err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
 
-// Optional endpoint: send test email to lead (useful for n8n to call)
+
+/* ----------------------------------------------------
+   SEND TEST EMAIL (for debugging)
+------------------------------------------------------*/
 async function sendTestEmail(req, res) {
   try {
-    const { leadId, subject, html } = req.body;
-    if (!leadId) return res.status(400).json({ ok: false, error: 'leadId required' });
-    const lead = await Lead.findById(leadId);
-    if (!lead) return res.status(404).json({ ok: false, error: 'lead not found' });
+    await sendEmail(
+      "your_email@gmail.com",
+      "Test Email",
+      "Your email service is working correctly!"
+    );
 
-    await sendEmail({ to: lead.email, subject: subject || 'Hello from AI LeadGen', html: html || '<p>Test</p>' });
+    return res.json({ ok: true, message: "Test email sent successfully!" });
 
-    lead.interactions.push({ type: 'email_sent', meta: { subject: subject || '' } });
-    await lead.save();
-
-    return res.json({ ok: true, msg: 'email_sent' });
   } catch (err) {
-    console.error(err);
     return res.status(500).json({ ok: false, error: err.message });
   }
 }
 
-module.exports = { upsertLead, listLeads, getLead, sendTestEmail };
+
+/* ----------------------------------------------------
+   EXPORT ALL FUNCTIONS
+------------------------------------------------------*/
+module.exports = {
+  upsertLead,
+  listLeads,
+  getLead,
+  sendTestEmail
+};
